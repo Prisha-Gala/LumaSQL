@@ -1,0 +1,81 @@
+'use strict';
+const $=id=>document.getElementById(id), names=['Lexical analysis','Syntax & AST','Semantic analysis','Intermediate code (ICG)','Rule-based optimization','Cost-based optimization','Execution & results'];
+const descriptions=['Turn your SQL into meaningful tokens.','A connected tree reveals the structure of your query.','Resolve tables, bind columns and check expression types.','Generate intermediate instructions using temporary relations.','Apply safe transformations that preserve the answer.','Compare eligible strategies using table statistics.','Execute the selected plan and check its answer against the baseline.'];
+let datasets=[],report=null,runId=null,current=0,busy=false;
+function make(tag,text,cls){const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;}
+async function api(path,data,raw=false){const r=await fetch(path,data===undefined?{}:{method:'POST',headers:{'Content-Type':raw?'application/octet-stream':'application/json'},body:raw?data:JSON.stringify(data)});let v;try{v=await r.json();}catch{throw Error('Server returned an unreadable response. Check the terminal.');}if(!r.ok)throw Error(v.error?.message||'Request failed');return v;}
+async function refresh(selected){datasets=(await api('/api/datasets')).datasets;$('dataset').replaceChildren();for(const ds of datasets){const o=make('option',ds.name);o.value=ds.id;$('dataset').append(o);}if(selected)$('dataset').value=selected;schema();}
+function schema(){const ds=datasets.find(d=>d.id===$('dataset').value);$('schema').replaceChildren();for(const t of ds?.tables||[]){const d=make('details'),s=make('summary',`${t.name} · ${t.row_count} rows`);d.append(s);for(const [name,type]of Object.entries(t.schema))d.append(make('div',`${name}  ${type}${t.indexed_columns?.includes(name)?'  ◇ indexed':''}`,'schema-cols'));d.append(make('p',`Index/statistics setup: ${t.setup_ms} ms`,'muted'));const b=make('button','Edit indexes');b.onclick=async()=>{const columns=prompt('Equality index columns, comma separated (blank removes indexes):',(t.indexed_columns||[]).join(', '));if(columns===null)return;try{await api('/api/indexes',{dataset_id:ds.id,table:t.name,columns:columns.split(',').map(x=>x.trim()).filter(Boolean)});await refresh(ds.id);}catch(e){$('setup-error').textContent=e.message;}};d.append(b);$('schema').append(d);}}
+$('dataset').onchange=schema;
+function lines(){$('lines').textContent=$('query').value.split('\n').map((_,i)=>i+1).join('\n');}lines();$('query').oninput=lines;
+const examples={index:'SELECT name, marks\nFROM students\nWHERE id = 42 AND 1 = 1;',join:'SELECT s.name, d.name\nFROM students s\nINNER JOIN departments d\n  ON s.department_id = d.id\nWHERE s.marks > 80\nORDER BY s.name;',departments:'SELECT id, name\nFROM departments\nORDER BY id;',departmentIndex:'SELECT name\nFROM departments\nWHERE id = 3;',missingTable:'SELECT name\nFROM teachers;',rules:'SELECT name, marks\nFROM students\nWHERE (marks > 80 AND marks > 80)\n  AND 2 + 3 = 5\nORDER BY marks DESC\nLIMIT 10;'};
+document.querySelectorAll('[data-example]').forEach(b=>b.onclick=()=>{$('query').value=examples[b.dataset.example];lines();});
+$('mode').onchange=()=>{const syntax=$('mode').value==='syntax';$('data-controls').hidden=syntax;$('mode-note').textContent=syntax?'Only phases 1–2 run. Validation, cost estimation and execution require tables.':$('mode').value==='compile'?'Use existing tables to validate and optimize, without executing the query.':'Built-in tables are ready to explore. Your own data is optional.';};
+$('overview').onclick=()=>$('overview-dialog').showModal();
+$('help').onclick=()=>$('help-dialog').showModal();document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$(b.dataset.close).close());
+$('demo').onclick=async()=>{try{const v=await api('/api/demo',{});await refresh(v.dataset_id);}catch(e){$('setup-error').textContent=e.message;}};
+$('import').onclick=()=>{const select=$('import-destination');select.replaceChildren();const fresh=make('option','Create a new dataset');fresh.value='';select.append(fresh);for(const ds of datasets){const o=make('option',ds.name);o.value=ds.id;select.append(o);}select.value=$('dataset').value;select.onchange=()=>$('new-name-wrap').hidden=!!select.value;select.onchange();$('import-error').textContent='';$('import-dialog').showModal();};
+$('file').onchange=()=>{const f=$('file').files[0];if(f)$('table-name').value=f.name.replace(/\.[^.]+$/,'').replace(/[^A-Za-z0-9_]/g,'_').replace(/^[0-9]/,'t_');};
+$('import-form').onsubmit=async e=>{e.preventDefault();const b=e.submitter;b.disabled=true;$('import-error').textContent='';try{const f=$('file').files[0];if(!f)throw Error('Choose a file.');if(f.size>8*1024*1024)throw Error('File exceeds 8 MiB.');const override=$('schema-override').value.trim();let schema=override?JSON.parse(override):undefined;let id=$('import-destination').value;if(!id){id=(await api('/api/datasets',{name:$('dataset-name').value})).dataset_id;const o=make('option',$('dataset-name').value);o.value=id;$('import-destination').append(o);$('import-destination').value=id;}
+if(/\.(db|sqlite|sqlite3)$/i.test(f.name))await api('/api/import/sqlite?dataset_id='+encodeURIComponent(id),await f.arrayBuffer(),true);else{const text=await f.text();await api('/api/tables',{dataset_id:id,name:$('table-name').value,indexed_columns:$('indexes').value.split(',').map(x=>x.trim()).filter(Boolean),schema,...(/\.json$/i.test(f.name)?{rows:JSON.parse(text)}:{csv_text:text})});}await refresh(id);$('import-dialog').close();}catch(e){$('import-error').textContent=e.message;}finally{b.disabled=false;}};
+$('start').onclick=async()=>{if(busy)return;$('setup-error').textContent='';$('start').disabled=true;try{const r=await api('/api/runs',{dataset_id:$('dataset').value,query:$('query').value,mode:$('mode').value});runId=r.run_id;report=null;current=0;$('setup').hidden=true;$('journey').hidden=false;$('journey-mode').textContent=$('mode').selectedOptions[0].textContent;await advance();}catch(e){$('setup').hidden=false;$('journey').hidden=true;$('setup-error').textContent=e.message;}finally{$('start').disabled=false;}};
+document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter'&&!$('setup').hidden){e.preventDefault();$('start').click();}});
+$('edit').onclick=()=>{$('setup').hidden=false;$('journey').hidden=true;window.scrollTo(0,0);};
+$('download').onclick=()=>{if(report)saveBlob(new Blob([JSON.stringify(report,null,2)],{type:'application/json'}),'lumasql-run.json');};
+async function advance(){if(busy)return;busy=true;const phase=report?.stages.length||0;$('loading-phase').textContent='PHASE '+String(phase+1).padStart(2,'0');$('loading-title').textContent=names[phase];$('loading').hidden=false;try{const [r]=await Promise.all([api('/api/next',{run_id:runId}),new Promise(resolve=>setTimeout(resolve,550))]);report=r;current=r.stages.length-1;render();}catch(e){$('output').replaceChildren(make('p',e.message,'error'));$('next').textContent='Retry phase →';$('next').onclick=advance;}finally{$('loading').hidden=true;busy=false;window.scrollTo(0,0);}}
+function panel(title){const p=make('section',undefined,'panel');if(title)p.append(make('h3',title));$('output').append(p);return p;}
+function codePanel(title,text,filename,note){
+  const p=panel(title);if(note)p.append(make('p',note));
+  const actions=make('div',undefined,'code-actions'),copy=make('button','Copy code'),download=make('button','↓ Download code');
+  const pre=make('pre',undefined,'generated-code'),code=make('code',text);pre.tabIndex=0;pre.setAttribute('aria-label',title);pre.append(code);
+  const status=make('span',undefined,'muted');status.setAttribute('role','status');
+  copy.onclick=async()=>{try{await navigator.clipboard.writeText(text);status.textContent='Copied';}catch{const range=document.createRange();range.selectNodeContents(code);const selection=window.getSelection();selection.removeAllRanges();selection.addRange(range);status.textContent='Code selected — press Ctrl+C / ⌘C to copy.';}};
+  download.onclick=()=>saveBlob(new Blob([text+'\n'],{type:'text/plain;charset=utf-8'}),filename);
+  actions.append(copy,download,status);p.append(actions,pre);return p;
+}
+function table(host,cols,rows,chosen=-1){const wrap=make('div',undefined,'scroll'),t=make('table'),head=make('thead'),tr=make('tr');for(const c of cols)tr.append(make('th',c));head.append(tr);t.append(head);const body=make('tbody');rows.forEach((row,i)=>{const r=make('tr',undefined,i===chosen?'chosen':'');for(const cell of row)r.append(make('td',cell===null?'NULL':typeof cell==='object'?JSON.stringify(cell):String(cell)));body.append(r);});t.append(body);wrap.append(t);host.append(wrap);}
+function metrics(items){const div=make('div',undefined,'metrics');for(const [value,label]of items){const d=make('div',undefined,'metric');d.append(make('strong',String(value)),make('span',label));div.append(d);}$('output').append(div);}
+function render(){const r=report;$('steps').replaceChildren();names.forEach((name,i)=>{const b=make('button',undefined,(i===current?'active ':'')+(r.stages[i]?.status==='complete'?'complete':''));b.append(make('span',r.stages[i]?.status==='complete'?'✓':String(i+1)),document.createTextNode(name));b.disabled=i>=r.stages.length;b.onclick=()=>{current=i;render();};$('steps').append(b);});$('phase-number').textContent='PHASE '+String(current+1).padStart(2,'0')+' / 07';$('phase-title').textContent=names[current];$('phase-description').textContent=descriptions[current];$('output').replaceChildren();$('timing').textContent='Backend phase time: '+r.stages[current].ms+' ms';
+if(r.stages[current].status!=='error')phaseNotes(r,current+1);
+if(r.stages[current].status==='error'){const p=panel('Let’s fix this query');p.append(make('p',r.error.message,'error'));if(r.error.line)p.append(make('p',`Line ${r.error.line}, column ${r.error.column}`));}
+else if(current===0){metrics([[r.tokens.filter(t=>t.type!=='EOF').length,'Tokens recognized'],[new Set(r.tokens.map(t=>t.type)).size,'Token categories'],[r.query.split('\n').length,'Lines of SQL']]);const p=panel('The building blocks');const ts=make('div',undefined,'tokens');for(const t of r.tokens){const c=make('span',undefined,'token');c.title=`Line ${t.line}, column ${t.column}`;c.append(make('small',t.type),document.createTextNode(String(t.value??'∎')));ts.append(c);}p.append(ts);}
+else if(current===1){drawTree(panel('Your abstract syntax tree'),r.ast);if(r.mode==='syntax')panel('Syntax check complete').append(make('p','Your query matches the supported grammar. Table names, types, costs and results have not been checked. Select compile or execute mode to continue with a dataset.'));}
+else if(current===2){const p=panel('Resolved output columns');table(p,['Output','Bound column','Type'],r.output_columns.map(c=>[c.name,c.source,c.data_type]));p.append(make('p','Table references and column types are valid for the selected dataset.'));drawTree(panel('Bound syntax tree'),r.bound_ast);}
+else if(current===3){
+  codePanel('Generated intermediate code (ICG)',r.intermediate_code,'intermediate-code.txt','Each temporary t1, t2, … holds a relation. Read top to bottom: each instruction uses an earlier temporary relation, and RETURN identifies the output.');
+}
+else if(current===4){
+  optimizationMethods();
+  codeComparison('Original versus rule-optimized code',[
+    ['Original ICG · Phase 4',r.intermediate_code,'intermediate-code.txt'],
+    ['Rule-optimized ICG · Phase 5',r.optimized_code,'optimized-code.txt']
+  ]);
+  costComparison(r,5);
+  metrics([[r.rule_optimizations.length,'Rule applications'],['Rules','Scan/join strategies are not chosen yet'],['Phase 7','Checks full result equivalence in execute mode']]);
+  ruleDetails(r);
+}
+else if(current===5){
+  optimizationMethods();
+  costComparison(r,6);
+  codeComparison('Rule-only versus cost-selected code',[
+    ['Rule-optimized code · Phase 5',r.optimized_code,'optimized-code.txt'],
+    ['Cost-selected physical code · Phase 6',r.physical_code,'physical-code.txt']
+  ]);
+  const original=make('details');original.append(make('summary','View original Phase 4 ICG'),make('pre',r.intermediate_code,'generated-code'));$('output').append(original);
+  metrics([[r.physical_plan.estimated_cost,'Estimated total cost · work units'],[r.physical_plan.estimated_rows,'Estimated output rows'],[r.cost_decisions.length,'Local cost decisions']]);
+  for(const kind of ['access_path','join_algorithm']){
+    const decisions=r.cost_decisions.filter(x=>x.kind===kind);
+    const p=panel(kind==='access_path'?'Scan versus index selection':'Join algorithm selection');
+    if(!decisions.length)p.append(make('p',kind==='join_algorithm'?'Not applicable: no join remains in this query plan.':'No table access remains after simplification.'));
+    for(const d of decisions){
+      p.append(make('h4',d.table?`${d.table} · ${d.alias}`:'Join strategy'));
+      table(p,['Candidate','Local estimated work','Estimated candidate rows','Decision'],d.alternatives.map((a,i)=>[a.type+(a.index_column?' · '+a.index_column+' = '+JSON.stringify(a.lookup_value):''),Number((a.access_cost??a.join_cost).toFixed(3)),a.estimated_rows??'—',i===d.chosen_candidate?'Selected':'Alternative']));
+      p.append(make('p',d.explanation));
+      if(d.alternatives.length===1)p.append(make('p','Only one eligible candidate is available. An equality lookup needs a suitable index; a hash join needs a supported equality key.'));
+    }
+  }
+  panel('Connect the choice to execution').append(make('p','SEQ_SCAN / INDEX_LOOKUP and HASH_JOIN / NESTED_LOOP_JOIN name the strategies selected above. Phase 7 executes the corresponding plan object and measures real work. An index lookup still retains the Filter to check the complete condition.'));
+}
+else if(current===6){if(r.result){metrics([[r.result.total_rows,'Result rows'],[r.optimized_metrics.execution_ms+' ms','Measured optimized execution'],[r.verification.status==='passed'?'Matched':'Not verified','Baseline result verification']]);const p=panel('The answer to your query');table(p,r.result.columns,r.result.rows);if(!r.result.rows.length)p.append(make('p','No rows matched this query.'));if(r.result.truncated)p.append(make('p','Showing the first 1,000 rows. Verification uses the full result.'));const b=make('button',r.result.truncated?'↓ Download displayed rows (CSV)':'↓ Download results (CSV)');b.onclick=()=>{const quote=x=>'"'+String(x??'').replaceAll('"','""')+'"';saveBlob(new Blob([[r.result.columns,...r.result.rows].map(row=>row.map(quote).join(',')).join('\r\n')],{type:'text/csv'}),'query-results.csv');};p.append(b);const compare=panel('Measured execution work');const keys=['execution_ms','rows_examined','cells_materialized','filter_checks','comparisons','arithmetic_operations','sort_input_rows','rows_returned','join_pairs_checked','hash_build_rows','hash_probe_rows','index_lookups'];table(compare,['Measurement','Baseline','Optimized'],keys.map(k=>[k,r.baseline_metrics?.[k]??'Not available',r.optimized_metrics[k]??0]));compare.append(make('p',r.verification.explanation||r.verification.status));}else panel('Compilation complete').append(make('p','Your optimized code is ready. Execution and result verification were not requested.'));const p=panel('Your optimization story');for(const rule of r.rule_optimizations)p.append(make('p','✓ '+rule.rule));for(const d of r.cost_decisions)p.append(make('p','✓ '+(d.table?d.table+': ':'Join: ')+d.chosen));}
+const last=current===r.stages.length-1;if(!last){$('next').textContent='Next completed phase →';$('next').onclick=()=>{current++;render();};}else if(r.done){$('next').textContent=r.error?'Edit query →':'Try another query ↗';$('next').onclick=()=>$('edit').click();}else{$('next').textContent='Run phase '+(current+2)+' →';$('next').onclick=advance;}}
+(async()=>{try{await api('/api/health');await refresh();if(!datasets.length){const d=await api('/api/demo',{});await refresh(d.dataset_id);}$('connection').textContent='● Backend connected';$('start').disabled=false;}catch(e){$('connection').textContent='Offline';$('setup-error').textContent=e.message+' Start the app using python run.py.';}})();

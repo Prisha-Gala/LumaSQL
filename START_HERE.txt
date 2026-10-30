@@ -1,0 +1,16 @@
+LumaSQL - frontend + backend
+
+1. Extract the ZIP completely.
+2. Open the lumasql folder in VS Code (the folder containing run.py).
+3. Terminal > New Terminal.
+4. Run: python run.py
+5. Open http://127.0.0.1:8000 if the browser does not open automatically.
+
+OR double-click start_windows.bat.
+Python 3.10+ is required. No pip/npm/venv/database-server installation needed.
+Do not cd backend. Do not run the older seven scripts separately.
+Read README.md for features, file explanations, limitations and teacher demo.
+Read PROJECT_GUIDE.md for presentation notes and tested queries with expected outputs.
+Use "How LumaSQL works" in the website header for an in-app overview.
+Version 2 removes plan diagrams/walkthroughs from phases 4-7; code, rules, costs and results remain.
+Use examples/try_queries.sql one statement at a time. Customers examples need CSV import first.
